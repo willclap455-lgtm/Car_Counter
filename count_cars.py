@@ -1,3 +1,4 @@
+import os
 import cv2
 import time
 import numpy as np
@@ -12,6 +13,7 @@ RTSP_URL = "rtsp://admin:clancy252629@192.168.105.120:554/cam/realmonitor?channe
 VEHICLE_CLASSES = {"car", "truck", "motorcycle", "bus"}
 
 INFER_INTERVAL = 0.5  # 2 FPS
+DEBUG_DIR = "debug"
 
 # -----------------------------
 # SIMPLE TRACKER STATE
@@ -53,6 +55,41 @@ def match_or_create_tracks(centroids):
 
     return assigned_ids
 
+def draw_vehicle_detections(frame, boxes, ids):
+    annotated = frame.copy()
+
+    for box, track_id in zip(boxes, ids):
+        x1, y1, x2, y2 = map(int, box)
+        cx, cy = get_centroid(box)
+        cx, cy = int(cx), int(cy)
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(annotated, (cx, cy), 4, (0, 0, 255), -1)
+
+        label = f"ID {track_id}"
+        (label_w, label_h), baseline = cv2.getTextSize(
+            label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+        )
+        label_y = max(y1 - 8, label_h + 4)
+        cv2.rectangle(
+            annotated,
+            (x1, label_y - label_h - 4),
+            (x1 + label_w + 4, label_y + baseline),
+            (0, 255, 0),
+            -1,
+        )
+        cv2.putText(
+            annotated,
+            label,
+            (x1 + 2, label_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 0),
+            2,
+        )
+
+    return annotated
+
 # -----------------------------
 # MODEL SETUP
 # -----------------------------
@@ -60,6 +97,8 @@ print("Loading model...")
 model = RFDETRMedium()
 model.optimize_for_inference(dtype=torch.float16)
 print("Model loaded.")
+
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 # -----------------------------
 # RTSP
@@ -113,25 +152,30 @@ while True:
     # -------------------------
     ids = match_or_create_tracks(centroids)
 
+    new_ids = [tid for tid in ids if tid not in seen_vehicle_ids]
     for tid in ids:
         seen_vehicle_ids.add(tid)
 
-    VEHICLES = len(ids)
-    TOTAL_VEHICLES = len(seen_vehicle_ids)
+    current_vehicles = len(ids)
+    new_vehicles = len(new_ids)
+    total_unique_vehicles = len(seen_vehicle_ids)
 
     # -------------------------
     # LOGGING
     # -------------------------
     print(
         f"[{frame_num}] "
-        f"VEHICLES: {VEHICLES} | "
-        f"TOTAL_VEHICLES: {TOTAL_VEHICLES}"
+        f"CURRENT: {current_vehicles} | "
+        f"NEW: {new_vehicles} | "
+        f"TOTAL: {total_unique_vehicles}"
     )
 
     # -------------------------
-    # DEBUG SNAPSHOT
+    # DEBUG SNAPSHOT (on vehicle detection)
     # -------------------------
-    if frame_num % 20 == 0:
-        cv2.imwrite(f"debug/frame_{frame_num}.jpg", frame)
+    if current_vehicles > 0:
+        annotated = draw_vehicle_detections(frame, vehicle_boxes, ids)
+        snapshot_path = os.path.join(DEBUG_DIR, f"frame_{frame_num}.jpg")
+        cv2.imwrite(snapshot_path, annotated)
 
     frame_num += 1
