@@ -16,8 +16,7 @@ INFER_INTERVAL = 0.5  # 2 FPS
 DEBUG_DIR = "debug"
 
 MAX_DIST = 100  # pixel distance threshold for track matching
-CONFIRM_FRAMES = 3  # consecutive frames before a track counts as a new vehicle
-MAX_MISSED_FRAMES = 15  # drop stale tracks after this many frames without a match
+CONFIRM_FRAMES = 2  # consecutive frames before a track counts as a new vehicle
 DEDUPE_IOU = 0.45  # suppress overlapping detections on the same vehicle
 
 # -----------------------------
@@ -26,7 +25,6 @@ DEDUPE_IOU = 0.45  # suppress overlapping detections on the same vehicle
 next_id = 0
 tracks = {}  # id -> centroid
 track_hits = {}  # id -> consecutive frames seen
-track_last_seen = {}  # id -> last frame index
 seen_vehicle_ids = set()
 
 
@@ -109,22 +107,15 @@ def match_or_create_tracks(centroids):
     return assigned_ids
 
 
-def update_track_lifecycle(ids, frame_num):
+def update_track_lifecycle(ids):
     active_ids = set(ids)
 
     for tid in ids:
         track_hits[tid] = track_hits.get(tid, 0) + 1
-        track_last_seen[tid] = frame_num
 
     for tid in list(track_hits.keys()):
         if tid not in active_ids:
             track_hits[tid] = 0
-
-    for tid in list(tracks.keys()):
-        if frame_num - track_last_seen.get(tid, frame_num) > MAX_MISSED_FRAMES:
-            tracks.pop(tid, None)
-            track_hits.pop(tid, None)
-            track_last_seen.pop(tid, None)
 
 
 def confirm_new_vehicle_ids(ids):
@@ -240,7 +231,7 @@ while True:
     # TRACKING
     # -------------------------
     ids = match_or_create_tracks(centroids)
-    update_track_lifecycle(ids, frame_num)
+    update_track_lifecycle(ids)
     newly_confirmed = confirm_new_vehicle_ids(ids)
 
     current_vehicles = len(ids)
