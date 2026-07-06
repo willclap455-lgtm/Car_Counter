@@ -15,55 +15,142 @@ VEHICLE_CLASSES = {"car", "truck", "motorcycle", "bus"}
 INFER_INTERVAL = 0.5  # 2 FPS
 DEBUG_DIR = "debug"
 
+MAX_DIST = 100  # pixel distance threshold for track matching
+CONFIRM_FRAMES = 3  # consecutive frames before a track counts as a new vehicle
+MAX_MISSED_FRAMES = 15  # drop stale tracks after this many frames without a match
+DEDUPE_IOU = 0.45  # suppress overlapping detections on the same vehicle
+
 # -----------------------------
-# SIMPLE TRACKER STATE
+# TRACKER STATE
 # -----------------------------
 next_id = 0
 tracks = {}  # id -> centroid
-MAX_DIST = 80  # pixel distance threshold
+track_hits = {}  # id -> consecutive frames seen
+track_last_seen = {}  # id -> last frame index
+seen_vehicle_ids = set()
+
 
 def get_centroid(xyxy):
     x1, y1, x2, y2 = xyxy
     return ((x1 + x2) / 2, (y1 + y2) / 2)
 
+
+def box_iou(a, b):
+    x1 = max(a[0], b[0])
+    y1 = max(a[1], b[1])
+    x2 = min(a[2], b[2])
+    y2 = min(a[3], b[3])
+
+    inter_w = max(0, x2 - x1)
+    inter_h = max(0, y2 - y1)
+    inter = inter_w * inter_h
+
+    area_a = max(0, a[2] - a[0]) * max(0, a[3] - a[1])
+    area_b = max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+    union = area_a + area_b - inter
+
+    return inter / union if union > 0 else 0.0
+
+
+def dedupe_vehicle_boxes(boxes, confidences=None, iou_thresh=DEDUPE_IOU):
+    if len(boxes) == 0:
+        return boxes
+
+    indices = list(range(len(boxes)))
+    if confidences is not None:
+        indices.sort(key=lambda i: confidences[i], reverse=True)
+
+    kept = []
+    for i in indices:
+        if any(box_iou(boxes[i], boxes[j]) > iou_thresh for j in kept):
+            continue
+        kept.append(i)
+
+    return boxes[kept]
+
+
 def match_or_create_tracks(centroids):
     global next_id, tracks
 
+    if not centroids:
+        return []
+
+    track_ids = list(tracks.keys())
+    candidate_pairs = []
+
+    for ci, centroid in enumerate(centroids):
+        for tid in track_ids:
+            dist = np.linalg.norm(np.array(centroid) - np.array(tracks[tid]))
+            if dist < MAX_DIST:
+                candidate_pairs.append((dist, ci, tid))
+
+    candidate_pairs.sort()
+
+    assigned_centroid = {}
+    used_tracks = set()
+
+    for _, ci, tid in candidate_pairs:
+        if ci in assigned_centroid or tid in used_tracks:
+            continue
+        assigned_centroid[ci] = tid
+        used_tracks.add(tid)
+
     assigned_ids = []
-    used_track_ids = set()
-
-    for c in centroids:
-        best_id = None
-        best_dist = float("inf")
-
-        for tid, tc in tracks.items():
-            if tid in used_track_ids:
-                continue
-
-            dist = np.linalg.norm(np.array(c) - np.array(tc))
-            if dist < best_dist and dist < MAX_DIST:
-                best_dist = dist
-                best_id = tid
-
-        if best_id is None:
-            best_id = next_id
+    for ci, centroid in enumerate(centroids):
+        if ci in assigned_centroid:
+            tid = assigned_centroid[ci]
+        else:
+            tid = next_id
             next_id += 1
 
-        tracks[best_id] = c
-        used_track_ids.add(best_id)
-        assigned_ids.append(best_id)
+        tracks[tid] = centroid
+        assigned_ids.append(tid)
 
     return assigned_ids
 
-def draw_vehicle_detections(frame, boxes, ids):
+
+def update_track_lifecycle(ids, frame_num):
+    active_ids = set(ids)
+
+    for tid in ids:
+        track_hits[tid] = track_hits.get(tid, 0) + 1
+        track_last_seen[tid] = frame_num
+
+    for tid in list(track_hits.keys()):
+        if tid not in active_ids:
+            track_hits[tid] = 0
+
+    for tid in list(tracks.keys()):
+        if frame_num - track_last_seen.get(tid, frame_num) > MAX_MISSED_FRAMES:
+            tracks.pop(tid, None)
+            track_hits.pop(tid, None)
+            track_last_seen.pop(tid, None)
+
+
+def confirm_new_vehicle_ids(ids):
+    newly_confirmed = []
+
+    for tid in ids:
+        if track_hits[tid] == CONFIRM_FRAMES and tid not in seen_vehicle_ids:
+            seen_vehicle_ids.add(tid)
+            newly_confirmed.append(tid)
+
+    return newly_confirmed
+
+
+def draw_vehicle_detections(frame, boxes, ids, highlight_ids=None):
     annotated = frame.copy()
+    highlight_ids = highlight_ids or set()
 
     for box, track_id in zip(boxes, ids):
         x1, y1, x2, y2 = map(int, box)
         cx, cy = get_centroid(box)
         cx, cy = int(cx), int(cy)
 
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        is_new = track_id in highlight_ids
+        box_color = (0, 0, 255) if is_new else (0, 255, 0)
+
+        cv2.rectangle(annotated, (x1, y1), (x2, y2), box_color, 2)
         cv2.circle(annotated, (cx, cy), 4, (0, 0, 255), -1)
 
         label = f"ID {track_id}"
@@ -75,7 +162,7 @@ def draw_vehicle_detections(frame, boxes, ids):
             annotated,
             (x1, label_y - label_h - 4),
             (x1 + label_w + 4, label_y + baseline),
-            (0, 255, 0),
+            box_color,
             -1,
         )
         cv2.putText(
@@ -89,6 +176,7 @@ def draw_vehicle_detections(frame, boxes, ids):
         )
 
     return annotated
+
 
 # -----------------------------
 # MODEL SETUP
@@ -108,11 +196,6 @@ cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
 last_infer_time = 0
 frame_num = 0
-
-# -----------------------------
-# PERSISTENT COUNTER
-# -----------------------------
-seen_vehicle_ids = set()
 
 # -----------------------------
 # MAIN LOOP
@@ -145,19 +228,23 @@ while True:
 
     vehicle_boxes = xyxy[vehicle_mask]
 
+    vehicle_confidences = None
+    if hasattr(detections, "confidence") and detections.confidence is not None:
+        vehicle_confidences = detections.confidence[vehicle_mask]
+
+    vehicle_boxes = dedupe_vehicle_boxes(vehicle_boxes, vehicle_confidences)
+
     centroids = [get_centroid(b) for b in vehicle_boxes]
 
     # -------------------------
     # TRACKING
     # -------------------------
     ids = match_or_create_tracks(centroids)
-
-    new_ids = [tid for tid in ids if tid not in seen_vehicle_ids]
-    for tid in ids:
-        seen_vehicle_ids.add(tid)
+    update_track_lifecycle(ids, frame_num)
+    newly_confirmed = confirm_new_vehicle_ids(ids)
 
     current_vehicles = len(ids)
-    new_vehicles = len(new_ids)
+    new_vehicles = len(newly_confirmed)
     total_unique_vehicles = len(seen_vehicle_ids)
 
     # -------------------------
@@ -171,10 +258,12 @@ while True:
     )
 
     # -------------------------
-    # DEBUG SNAPSHOT (on vehicle detection)
+    # DEBUG SNAPSHOT (only when a vehicle is newly confirmed)
     # -------------------------
-    if current_vehicles > 0:
-        annotated = draw_vehicle_detections(frame, vehicle_boxes, ids)
+    if newly_confirmed:
+        annotated = draw_vehicle_detections(
+            frame, vehicle_boxes, ids, highlight_ids=set(newly_confirmed)
+        )
         snapshot_path = os.path.join(DEBUG_DIR, f"frame_{frame_num}.jpg")
         cv2.imwrite(snapshot_path, annotated)
 
