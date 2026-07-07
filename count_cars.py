@@ -110,32 +110,41 @@ def match_or_create_tracks(centroids):
     return assigned_ids
 
 
+# Track age state to track how many frames a car has been missing
+track_misses = {}  # id -> consecutive frames missed
+
 def update_track_lifecycle(ids):
-    global tracks, track_hits
+    global tracks, track_hits, track_misses
     active_ids = set(ids)
 
-    # Increment hits for active tracks
     for tid in ids:
         track_hits[tid] = track_hits.get(tid, 0) + 1
+        track_misses[tid] = 0  # Reset miss counter because we saw it
 
-    # INSTANT PURGE: If a track wasn't detected in this frame, 
-    # wipe it from memory entirely so the script stays lightning fast.
+    # Check all tracked items to see who is missing
     for tid in list(tracks.keys()):
         if tid not in active_ids:
-            tracks.pop(tid, None)
-            track_hits.pop(tid, None)
+            track_misses[tid] = track_misses.get(tid, 0) + 1
+            # Reset consecutive hits since it was missed
+            track_hits[tid] = 0 
+            
+            # GRACE PERIOD: Only delete if it has been missing for 5 frames (~1 second)
+            if track_misses[tid] > 5:
+                tracks.pop(tid, None)
+                track_hits.pop(tid, None)
+                track_misses.pop(tid, None)
 
 
 def confirm_new_vehicle_ids(ids):
     newly_confirmed = []
     for tid in ids:
-        # Since we purge missing tracks instantly, track_hits[tid] will 
-        # naturally count consecutive active frames perfectly.
+        # Check track_hits safely using .get()
         if track_hits.get(tid, 0) == CONFIRM_FRAMES and tid not in seen_vehicle_ids:
             seen_vehicle_ids.add(tid)
             newly_confirmed.append(tid)
 
     return newly_confirmed
+
 
 def draw_vehicle_detections(frame, boxes, ids, highlight_ids=None):
     annotated = frame.copy()
