@@ -11,7 +11,7 @@ from rfdetr import RFDETRMedium
 # -----------------------------
 RTSP_URL = "rtsp://admin:clancy252629@192.168.105.120:554/cam/realmonitor?channel=1&subtype=2"
 
-WIDTH, HEIGHT = 640, 640  
+WIDTH, HEIGHT = 640, 480
 CHANNELS = 3
 FRAME_SIZE = WIDTH * HEIGHT * CHANNELS
 
@@ -111,26 +111,31 @@ def match_or_create_tracks(centroids):
 
 
 def update_track_lifecycle(ids):
+    global tracks, track_hits
     active_ids = set(ids)
 
+    # Increment hits for active tracks
     for tid in ids:
         track_hits[tid] = track_hits.get(tid, 0) + 1
 
-    for tid in list(track_hits.keys()):
+    # INSTANT PURGE: If a track wasn't detected in this frame, 
+    # wipe it from memory entirely so the script stays lightning fast.
+    for tid in list(tracks.keys()):
         if tid not in active_ids:
-            track_hits[tid] = 0
+            tracks.pop(tid, None)
+            track_hits.pop(tid, None)
 
 
 def confirm_new_vehicle_ids(ids):
     newly_confirmed = []
-
     for tid in ids:
-        if track_hits[tid] == CONFIRM_FRAMES and tid not in seen_vehicle_ids:
+        # Since we purge missing tracks instantly, track_hits[tid] will 
+        # naturally count consecutive active frames perfectly.
+        if track_hits.get(tid, 0) == CONFIRM_FRAMES and tid not in seen_vehicle_ids:
             seen_vehicle_ids.add(tid)
             newly_confirmed.append(tid)
 
     return newly_confirmed
-
 
 def draw_vehicle_detections(frame, boxes, ids, highlight_ids=None):
     annotated = frame.copy()
