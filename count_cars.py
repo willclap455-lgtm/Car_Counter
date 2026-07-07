@@ -183,25 +183,22 @@ print("Model loaded.")
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 # -----------------------------
-# FFmpeg RTSP SUBPROCESS (Zero-Latency Drift Fixed)
+# FFmpeg RTSP SUBPROCESS (Fixed Stream Analysis Crash)
 # -----------------------------
 print("Launching Real-Time Dropping FFmpeg RTSP pipeline...")
 ffmpeg_cmd = [
     'ffmpeg',
     '-rtsp_transport', 'tcp',
-    '-fflags', 'nobuffer+discardcorrupt',     # Do not buffer incoming stream bytes
-    '-flags', 'low_delay',                    # Instruct decoder to output immediately
-    '-probesize', '32',                       # Skip analyzing stream data on start to remove latency
-    '-analyzeduration', '0',
-    '-i', RTSP_URL,
-    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   # Output target frame rate
+    '-fflags', 'nobuffer+discardcorrupt',     # Keep: stops internal buffering
+    '-flags', 'low_delay',                    # Keep: low-latency decoding
+    '-i', RTSP_URL,                           # Let FFmpeg default analyze the stream safely here
+    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   
     '-f', 'image2pipe',
     '-pix_fmt', 'bgr24',
     '-vcodec', 'rawvideo',
     '-'
 ]
 
-# Set a massive read buffer on Popen but we will aggressively clear it in Python
 process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=FRAME_SIZE * 2)
 frame_num = 0
 
