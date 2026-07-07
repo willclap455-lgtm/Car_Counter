@@ -19,8 +19,8 @@ VEHICLE_CLASSES = {"car", "truck", "motorcycle", "bus"}
 DEBUG_DIR = "debug"
 
 MAX_DIST = 100        # pixel distance threshold for track matching
-CONFIRM_FRAMES = 3    # Updated per request: 3 consecutive frames
-DEDUPE_IOU = 0.40     # Updated per request: aggressive overlap suppression
+CONFIRM_FRAMES = 6    # Updated per request: 3 consecutive frames
+DEDUPE_IOU = 0.35     # Updated per request: aggressive overlap suppression
 
 # -----------------------------
 # TRACKER STATE
@@ -190,7 +190,7 @@ ffmpeg_cmd = [
     'ffmpeg',
     '-rtsp_transport', 'tcp',                 # Prevents UDP frame drops over network
     '-i', RTSP_URL,
-    '-vf', f'fps=4,scale={WIDTH}:{HEIGHT}',   # Throttles to 4fps and resizes frame in C
+    '-vf', f'fps=8,scale={WIDTH}:{HEIGHT}',   # Throttles to 4fps and resizes frame in C
     '-f', 'image2pipe',
     '-pix_fmt', 'bgr24',                      # Uses bgr24 directly so cv2 can save natively
     '-vcodec', 'rawvideo',
