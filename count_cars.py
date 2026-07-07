@@ -183,21 +183,26 @@ print("Model loaded.")
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 # -----------------------------
-# FFmpeg RTSP SUBPROCESS
+# FFmpeg RTSP SUBPROCESS (Zero-Latency Drift Fixed)
 # -----------------------------
-print("Launching FFmpeg RTSP pipeline...")
+print("Launching Real-Time Dropping FFmpeg RTSP pipeline...")
 ffmpeg_cmd = [
     'ffmpeg',
-    '-rtsp_transport', 'tcp',                 # Prevents UDP frame drops over network
+    '-rtsp_transport', 'tcp',
+    '-fflags', 'nobuffer+discardcorrupt',     # Do not buffer incoming stream bytes
+    '-flags', 'low_delay',                    # Instruct decoder to output immediately
+    '-probesize', '32',                       # Skip analyzing stream data on start to remove latency
+    '-analyzeduration', '0',
     '-i', RTSP_URL,
-    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   # Throttles to 4fps and resizes frame in C
+    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   # Output target frame rate
     '-f', 'image2pipe',
-    '-pix_fmt', 'bgr24',                      # Uses bgr24 directly so cv2 can save natively
+    '-pix_fmt', 'bgr24',
     '-vcodec', 'rawvideo',
     '-'
 ]
 
-process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=FRAME_SIZE)
+# Set a massive read buffer on Popen but we will aggressively clear it in Python
+process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.PIPE, bufsize=FRAME_SIZE * 2)
 frame_num = 0
 
 # -----------------------------
@@ -205,32 +210,30 @@ frame_num = 0
 # -----------------------------
 try:
     while True:
-        # Pull raw pre-scaled frame bytes out of the pipeline
+        # STRATEGY: Read the latest frame. If more frames are waiting in the pipe, 
+        # read them rapidly and throw them away so we are ALWAYS looking at live data.
+        
         in_bytes = process.stdout.read(FRAME_SIZE)
         if len(in_bytes) != FRAME_SIZE:
             print("RTSP Stream broken or ended.")
             break
 
-        # Reconstruct into frame array
+        # Check if there is more data waiting in the pipe right behind it
+        # (This kills the "running slower over time" lag completely)
+        while True:
+            # Look at OS buffer to see if another frame is already piled up
+            import select
+            ready, _, _ = select.select([process.stdout], [], [], 0)
+            if ready:
+                # Discard the stale frame we just read and grab the newer one instead
+                in_bytes = process.stdout.read(FRAME_SIZE)
+                if len(in_bytes) != FRAME_SIZE:
+                    break
+            else:
+                break
+
+        # Reconstruct the truly live frame array
         frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, CHANNELS))
-
-        # -------------------------
-        # INFERENCE
-        # -------------------------
-        detections = model.predict(frame, threshold=0.5)
-
-        class_names = detections.data["class_name"]
-        xyxy = detections.xyxy
-
-        vehicle_mask = np.isin(class_names, list(VEHICLE_CLASSES))
-        vehicle_boxes = xyxy[vehicle_mask]
-
-        vehicle_confidences = None
-        if hasattr(detections, "confidence") and detections.confidence is not None:
-            vehicle_confidences = detections.confidence[vehicle_mask]
-
-        vehicle_boxes = dedupe_vehicle_boxes(vehicle_boxes, vehicle_confidences)
-        centroids = [get_centroid(b) for b in vehicle_boxes]
 
         # -------------------------
         # TRACKING
