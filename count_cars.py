@@ -1,16 +1,16 @@
 import os
 import cv2
 import subprocess
+import select
 import numpy as np
 import torch
 from rfdetr import RFDETRMedium
 
 # -----------------------------
-# CONFIG
+# CONFIG (Tuned to NOT miss fast or grouped cars)
 # -----------------------------
 RTSP_URL = "rtsp://admin:clancy252629@192.168.105.120:554/cam/realmonitor?channel=1&subtype=2"
 
-# FFmpeg Frame Dimension Config (Match this to your model's native input size)
 WIDTH, HEIGHT = 640, 640  
 CHANNELS = 3
 FRAME_SIZE = WIDTH * HEIGHT * CHANNELS
@@ -18,9 +18,9 @@ FRAME_SIZE = WIDTH * HEIGHT * CHANNELS
 VEHICLE_CLASSES = {"car", "truck", "motorcycle", "bus"}
 DEBUG_DIR = "debug"
 
-MAX_DIST = 160        # pixel distance threshold for track matching
-CONFIRM_FRAMES = 2    # Updated per request: 3 consecutive frames
-DEDUPE_IOU = 0.55     # Updated per request: aggressive overlap suppression
+MAX_DIST = 180        # Wide search area to lock onto speeding vehicles
+CONFIRM_FRAMES = 2    # Quick confirmation so fast-moving cars are locked in instantly
+DEDUPE_IOU = 0.50     # Balanced duplication suppression
 
 # -----------------------------
 # TRACKER STATE
@@ -183,18 +183,18 @@ print("Model loaded.")
 os.makedirs(DEBUG_DIR, exist_ok=True)
 
 # -----------------------------
-# FFmpeg RTSP SUBPROCESS (Fixed Stream Analysis Crash)
+# FFmpeg RTSP SUBPROCESS
 # -----------------------------
 print("Launching Real-Time Dropping FFmpeg RTSP pipeline...")
 ffmpeg_cmd = [
     'ffmpeg',
     '-rtsp_transport', 'tcp',
-    '-fflags', 'nobuffer+discardcorrupt',     # Keep: stops internal buffering
-    '-flags', 'low_delay',                    # Keep: low-latency decoding
-    '-i', RTSP_URL,                           # Let FFmpeg default analyze the stream safely here
-    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   
+    '-fflags', 'nobuffer+discardcorrupt',     # Stops internal buffering
+    '-flags', 'low_delay',                    # Minimizes decoding delay
+    '-i', RTSP_URL,
+    '-vf', f'fps=5,scale={WIDTH}:{HEIGHT}',   # Output 5 frames per second
     '-f', 'image2pipe',
-    '-pix_fmt', 'bgr24',
+    '-pix_fmt', 'bgr24',                      # Native cv2 format
     '-vcodec', 'rawvideo',
     '-'
 ]
@@ -207,30 +207,43 @@ frame_num = 0
 # -----------------------------
 try:
     while True:
-        # STRATEGY: Read the latest frame. If more frames are waiting in the pipe, 
-        # read them rapidly and throw them away so we are ALWAYS looking at live data.
-        
+        # 1. Grab initial frame data
         in_bytes = process.stdout.read(FRAME_SIZE)
         if len(in_bytes) != FRAME_SIZE:
             print("RTSP Stream broken or ended.")
             break
 
-        # Check if there is more data waiting in the pipe right behind it
-        # (This kills the "running slower over time" lag completely)
+        # 2. Check if more frames are waiting in the pipeline.
+        # If yes, dump the old one, read the new one. Keeps it strictly real-time.
         while True:
-            # Look at OS buffer to see if another frame is already piled up
-            import select
             ready, _, _ = select.select([process.stdout], [], [], 0)
             if ready:
-                # Discard the stale frame we just read and grab the newer one instead
                 in_bytes = process.stdout.read(FRAME_SIZE)
                 if len(in_bytes) != FRAME_SIZE:
                     break
             else:
                 break
 
-        # Reconstruct the truly live frame array
+        # 3. Build numpy frame
         frame = np.frombuffer(in_bytes, dtype=np.uint8).reshape((HEIGHT, WIDTH, CHANNELS))
+
+        # -------------------------
+        # INFERENCE
+        # -------------------------
+        detections = model.predict(frame, threshold=0.3)
+
+        class_names = detections.data["class_name"]
+        xyxy = detections.xyxy
+
+        vehicle_mask = np.isin(class_names, list(VEHICLE_CLASSES))
+        vehicle_boxes = xyxy[vehicle_mask]
+
+        vehicle_confidences = None
+        if hasattr(detections, "confidence") and detections.confidence is not None:
+            vehicle_confidences = detections.confidence[vehicle_mask]
+
+        vehicle_boxes = dedupe_vehicle_boxes(vehicle_boxes, vehicle_confidences)
+        centroids = [get_centroid(b) for b in vehicle_boxes]
 
         # -------------------------
         # TRACKING
@@ -263,8 +276,7 @@ try:
             snapshot_path = os.path.join(DEBUG_DIR, f"frame_{frame_num}.jpg")
             cv2.imwrite(snapshot_path, annotated)
 
-            # Optional: Clean up old coordinates to stop infinite memory growth
-            # on dead tracking points out of frame
+            # Keep tracking memory from expanding indefinitely
             if len(tracks) > 100:
                 tracks = {tid: tracks[tid] for tid in ids}
 
